@@ -1,3 +1,4 @@
+
 from aws_cdk import (
     CfnOutput,
     Duration,
@@ -6,7 +7,8 @@ from aws_cdk import (
     aws_apigateway as apigw,
     aws_dynamodb as dynamodb,
     aws_lambda as lambda_,
-    aws_ssm as ssm)
+    aws_ssm as ssm,
+)
 from constructs import Construct
 
 # The build script publishes the layer's Version ARN to this SSM parameter.
@@ -17,38 +19,73 @@ class BackendStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs) -> None:
         super().__init__(scope, construct_id, **kwargs)
 
+        # 1. Create DynamoDB table
         table = dynamodb.Table(
             self,
             "HrTable",
             partition_key=dynamodb.Attribute(
-                name="PK", type=dynamodb.AttributeType.STRING
+                name="PK",
+                type=dynamodb.AttributeType.STRING,
             ),
-            sort_key=dynamodb.Attribute(name="SK", type=dynamodb.AttributeType.STRING),
+            sort_key=dynamodb.Attribute(
+                name="SK",
+                type=dynamodb.AttributeType.STRING,
+            ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY)
+            removal_policy=RemovalPolicy.DESTROY,
+        )
 
-        # Read the ARN the build script stored, resolved at synth time.
-        fastapi_layer_arn = ssm.StringParameter.value_for_string_parameter(self, LAYER_ARN_PARAM)
+        # 2. Add Global Secondary Index (GSI1)
+        table.add_global_secondary_index(
+            index_name="GSI1",
+            partition_key=dynamodb.Attribute(
+                name="GSI1PK",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="GSI1SK",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+
+        # 3. Read FastAPI Layer ARN from SSM Parameter Store
+        fastapi_layer_arn = ssm.StringParameter.value_for_string_parameter(
+            self,
+            LAYER_ARN_PARAM,
+        )
 
         fastapi_layer = lambda_.LayerVersion.from_layer_version_arn(
             self,
             "FastApiLayer",
-            layer_version_arn=fastapi_layer_arn)
+            layer_version_arn=fastapi_layer_arn,
+        )
 
+        # 4. Create Lambda function
         api_function = lambda_.Function(
             self,
             "ApiFunction",
             runtime=lambda_.Runtime.PYTHON_3_14,
             handler="handler.lambda_handler",
-            code=lambda_.Code.from_asset("api", exclude=["__pycache__", "*.pyc"]),
+            code=lambda_.Code.from_asset(
+                "api",
+                exclude=["__pycache__", "*.pyc"],
+            ),
             layers=[fastapi_layer],
             timeout=Duration.seconds(10),
             memory_size=512,
-            environment={"TABLE_NAME": table.table_name})
+            environment={"TABLE_NAME": table.table_name},
+        )
 
+        # 5. Grant Lambda read/write access to DynamoDB
         table.grant_read_write_data(api_function)
 
-        api = apigw.LambdaRestApi(self, "HrApi", handler=api_function)
+        # 6. Create API Gateway
+        api = apigw.LambdaRestApi(
+            self,
+            "HrApi",
+            handler=api_function,
+        )
 
+        # 7. CloudFormation Outputs
         CfnOutput(self, "ApiUrl", value=api.url)
         CfnOutput(self, "TableName", value=table.table_name)
